@@ -3,7 +3,7 @@ import numpy as np
 import streamlit as st
 
 # Load the trained model
-model = joblib.load("saved.pkl")
+model = joblib.load("credit_card_model.pkl")
 
 st.title("Credit Card Fraud Detection")
 
