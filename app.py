@@ -1,6 +1,9 @@
 import streamlit as st
 import joblib
 import numpy as np
+import cv2
+from PIL import Image
+from qreader import QReader
 
 # Page configuration
 st.set_page_config(
@@ -32,30 +35,65 @@ st.caption("AI-powered real-time transaction monitoring and anomaly detection en
 def load_model():
     return joblib.load("credit_card_model.pkl")
 
+# Load QReader instance
+@st.cache_resource
+def load_qreader():
+    return QReader()
+
 model = load_model()
+qreader = load_qreader()
 num_features = getattr(model, "n_features_in_", 30)
 
-# Card Input Method Selection
+# Session state initialization for dynamic persistence
+if "card_number" not in st.session_state:
+    st.session_state.card_number = "XXXX XXXX XXXX 8821"
+if "card_holder" not in st.session_state:
+    st.session_state.card_holder = "KRISHNA CR"
+if "valid_thru" not in st.session_state:
+    st.session_state.valid_thru = "10/28"
+
 st.subheader("1. Card Identification")
-input_mode = st.radio("Card Input Mode:", ["Manual / USB Card Reader Entry", "Camera / Barcode Scanner"], horizontal=True)
+input_mode = st.radio("Card Input Mode:", ["Manual / Direct Entry", "Real-time QR Card Scanner"], horizontal=True)
 
-card_holder = "KRISHNA CR"
-card_number = "XXXX XXXX XXXX 8821"
-
-if input_mode == "Camera / Barcode Scanner":
-    camera_pic = st.camera_input("Scan Card Front / QR / Barcode")
+if input_mode == "Real-time QR Card Scanner":
+    camera_pic = st.camera_input("Scan Card QR Code")
     if camera_pic:
-        st.success("Card data acquired via optical scanner.")
-        card_holder = "KRISHNA CR"
-        card_number = "XXXX XXXX XXXX 4109"
+        # Image processing for QReader
+        img = Image.open(camera_pic)
+        img_np = np.array(img)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+        # Decode QR
+        decoded_texts = qreader.detect_and_decode(image=img_bgr)
+        
+        if decoded_texts and decoded_texts[0]:
+            qr_content = decoded_texts[0].strip()
+            st.success(f"Scanned QR Payload: `{qr_content}`")
+            
+            # Format parsing: supports 'CARD_NUMBER,NAME,EXPIRY' or plain CARD_NUMBER
+            parts = [p.strip() for p in qr_content.split(",")]
+            raw_num = parts[0].replace(" ", "").replace("-", "")
+            
+            if len(raw_num) >= 4:
+                st.session_state.card_number = f"XXXX XXXX XXXX {raw_num[-4:]}"
+            else:
+                st.session_state.card_number = f"XXXX XXXX XXXX {raw_num}"
+                
+            if len(parts) >= 2:
+                st.session_state.card_holder = parts[1].upper()
+            if len(parts) >= 3:
+                st.session_state.valid_thru = parts[2]
+        else:
+            st.warning("QR code detect nahi ho paya. Lighting aur angle check karein.")
 else:
     col_c1, col_c2 = st.columns(2)
     with col_c1:
-        card_holder = st.text_input("Cardholder Name", value="KRISHNA CR").upper()
+        st.session_state.card_holder = st.text_input("Cardholder Name", value=st.session_state.card_holder).upper()
     with col_c2:
-        raw_card = st.text_input("Card Number (Direct / USB Reader)", value="4532 8921 7731 8821")
-        if len(raw_card) >= 4:
-            card_number = f"XXXX XXXX XXXX {raw_card[-4:]}"
+        raw_card = st.text_input("Card Number", value="4532 8921 7731 8821")
+        clean_num = raw_card.replace(" ", "").replace("-", "")
+        if len(clean_num) >= 4:
+            st.session_state.card_number = f"XXXX XXXX XXXX {clean_num[-4:]}"
 
 # Real-time Card View
 st.markdown(f"""
@@ -65,11 +103,11 @@ st.markdown(f"""
         <span style="font-size: 16px; font-weight: bold; color: #ffb74d;">EMV SECURED</span>
     </div>
     <p style="letter-spacing: 4px; font-size: 20px; font-weight: 500; margin-top: 18px; margin-bottom: 18px;">
-        {card_number}
+        {st.session_state.card_number}
     </p>
     <div style="display: flex; justify-content: space-between; font-size: 12px; color: #eceff1;">
-        <span>HOLDER: <b>{card_holder}</b></span>
-        <span>VALID THRU: <b>10/28</b></span>
+        <span>HOLDER: <b>{st.session_state.card_holder}</b></span>
+        <span>VALID THRU: <b>{st.session_state.valid_thru}</b></span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -96,12 +134,11 @@ channel = st.selectbox("Payment Channel Verification", ["Chip & PIN Secured", "C
 
 st.write("---")
 
-# Feature Synthesizer (Internal PCA Mapping)
+# Feature Vector Synthesizer
 def build_feature_vector(amount, sector, loc, time_win, ch):
     vec = np.zeros(num_features)
     risk_score = 0.0
 
-    # Risk factors
     if loc == "International / Cross-Border":
         risk_score += 2.8
     elif loc == "Domestic (Other State / City)":
@@ -116,11 +153,9 @@ def build_feature_vector(amount, sector, loc, time_win, ch):
     if sector in ["Jewelry & Luxury Goods", "Online Foreign Gaming / Crypto"]:
         risk_score += 1.5
 
-    # High amount check in INR (₹1,50,000+)
     if amount >= 150000:
         risk_score += 2.2
 
-    # Map to PCA signals
     np.random.seed(int(amount) % 100)
     vec += np.random.normal(0, 0.15, num_features)
 
@@ -139,11 +174,10 @@ def build_feature_vector(amount, sector, loc, time_win, ch):
         vec[14] = 0.05
         vec[17] = -0.08
 
-    # Store normalized amount
     vec[-1] = amount / 85.0
     return vec
 
-# Prediction Trigger
+# Prediction Evaluation
 if st.button("Evaluate Transaction Risk", type="primary", use_container_width=True):
     with st.spinner("Analyzing transaction vectors against trained fraud boundaries..."):
         features = build_feature_vector(amount_inr, merchant_sector, txn_location, txn_time, channel)
@@ -151,8 +185,8 @@ if st.button("Evaluate Transaction Risk", type="primary", use_container_width=Tr
 
     st.write("")
     if prediction[0] == 1:
-        st.error(f"🚨 **TRANSACTION REJECTED: Suspicious / Fraudulent Activity Detected!**")
-        st.warning(f"Flagged for card {card_number} | Amount: ₹{amount_inr:,.2f}")
+        st.error("🚨 **TRANSACTION REJECTED: Suspicious / Fraudulent Activity Detected!**")
+        st.warning(f"Flagged for card {st.session_state.card_number} | Amount: ₹{amount_inr:,.2f}")
     else:
-        st.success(f"✅ **TRANSACTION APPROVED: Legitimate Activity Verified.**")
-        st.info(f"Cleared for card {card_number} | Amount: ₹{amount_inr:,.2f}")
+        st.success("✅ **TRANSACTION APPROVED: Legitimate Activity Verified.**")
+        st.info(f"Cleared for card {st.session_state.card_number} | Amount: ₹{amount_inr:,.2f}")
