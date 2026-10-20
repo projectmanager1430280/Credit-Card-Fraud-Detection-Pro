@@ -2,3 +2,5 @@ streamlit
 joblib
 numpy
 scikit-learn
+qreader
+opencv-python-headless
